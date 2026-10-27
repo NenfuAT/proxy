@@ -25,6 +25,8 @@ var (
 	ecrRe = regexp.MustCompile(`\A\d+.dkr.ecr.([a-z0-9-]+)\.amazonaws\.com\z`)
 )
 
+const ecrPublicHost = "public.ecr.aws"
+
 type ecrClient interface {
 	GetAuthorizationToken(ctx context.Context, input *ecr.GetAuthorizationTokenInput, optFns ...func(*ecr.Options)) (*ecr.GetAuthorizationTokenOutput, error)
 }
@@ -239,6 +241,19 @@ func (h *DockerRegistryHandler) authenticateWithCredential(
 	if cred.getECRCredentials(req.Context(), proxyCtx) {
 		logging.RequestLogf(proxyCtx, "* authenticating docker ecr request (host: %s)", req.URL.Hostname())
 		helpers.SetBasicAuthorization(req, cred.ecrUsername, cred.ecrPassword)
+		return
+	}
+
+	// ECR Public rejects Basic auth on registry requests with a 400 instead of
+	// a 401 challenge, so the token flow below would never start. Its HTTP API
+	// takes the GetAuthorizationToken token, base64("AWS:<password>"), as a
+	// bearer token, so send that directly. Other paths, such as /token, still
+	// accept Basic auth and keep the token flow below.
+	if _, ok := helpers.MatchingPathPrefix(req.URL.EscapedPath(), "/v2"); ok &&
+		helpers.AreHostnamesEqual(req.URL.Hostname(), ecrPublicHost) {
+		logging.RequestLogf(proxyCtx, "* authenticating docker ecr public request (host: %s)", req.URL.Hostname())
+		token := base64.StdEncoding.EncodeToString([]byte(cred.getUsername() + ":" + cred.getPassword()))
+		helpers.SetBearerAuthorization(req, token)
 		return
 	}
 
